@@ -5199,6 +5199,45 @@ final;`,
     await this.renumberGradebookColumnsForGrouping(class_id);
     await this.deleteGradebookColumnBySlug(class_id, "quiz-3");
 
+    // Fresh seeds run after the migration, so these fixtures must declare their membership explicitly.
+    const { data: seededColumns, error: columnsError } = await supabase
+      .from("gradebook_columns")
+      .select("id, gradebook_id, slug, name, sort_order")
+      .eq("class_id", class_id)
+      .order("sort_order");
+    if (columnsError) throw columnsError;
+    const families = [
+      { name: "Lab", matches: (slug: string) => /^assignment-lab-/.test(slug) },
+      { name: "Assignment", matches: (slug: string) => /^assignment-assignment-/.test(slug) },
+      { name: "Exam", matches: (slug: string) => /^exam-/.test(slug) },
+      { name: "Quiz", matches: (slug: string) => /^quiz-/.test(slug) },
+      { name: "Skill", matches: (slug: string) => /^skill-/.test(slug) },
+      { name: "AI Usage Log", matches: (slug: string) => /^ai-usage-log-/.test(slug) }
+    ];
+    const groupIds = new Map<string, number>();
+    for (const column of seededColumns ?? []) {
+      const family = families.find((candidate) => candidate.matches(column.slug));
+      const key = family?.name ?? column.slug;
+      let groupId = groupIds.get(key);
+      if (groupId === undefined) {
+        const { data: group, error } = await supabase
+          .from("gradebook_column_groups")
+          .insert({
+            class_id,
+            gradebook_id: column.gradebook_id,
+            name: family?.name ?? column.name,
+            sort_order: groupIds.size
+          })
+          .select("id")
+          .single();
+        if (error) throw error;
+        groupId = group.id;
+        groupIds.set(key, groupId);
+      }
+      const { error } = await supabase.from("gradebook_columns").update({ group_id: groupId }).eq("id", column.id);
+      if (error) throw error;
+    }
+
     // Quiz scores are set after the delete so quiz-3 never gets any (the delete path has to
     // clear gradebook_column_students first, and there is no reason to make it do more work).
     const { data: quizColumns } = await supabase

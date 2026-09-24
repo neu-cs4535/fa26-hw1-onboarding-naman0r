@@ -178,4 +178,177 @@ test.describe("gradebook column groups", () => {
     // eslint-disable-next-line no-console
     console.log(`Group headers when collapsed: ${groupSummaries.join(" | ") || "(none matched by text shape)"}`);
   });
+
+  test("manage groups without losing membership or grades", async ({ page }) => {
+    const course = await findSeededClass();
+    const instructor = await findInstructor(course.id);
+    const { data: columns, error } = await supabase
+      .from("gradebook_columns")
+      .select("id, group_id, name")
+      .eq("class_id", course.id)
+      .in("slug", ["quiz-1", "quiz-2"]);
+    if (error) throw error;
+    expect(columns).toHaveLength(2);
+    const before = await supabase
+      .from("gradebook_column_students")
+      .select("*", { count: "exact", head: true })
+      .in(
+        "gradebook_column_id",
+        columns!.map((column) => column.id)
+      );
+    const groupName = `Review group ${Date.now()}`;
+    const renamed = `${groupName} renamed`;
+    let groupId: number | undefined;
+    try {
+      await loginAsUser(page, instructor, course);
+      await page.goto(`/course/${course.id}/manage/gradebook`);
+      await page.getByRole("button", { name: "Manage groups", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Gradebook groups" });
+      await dialog.getByLabel("New group name").fill(groupName);
+      await dialog.getByRole("button", { name: "Create group", exact: true }).click();
+      await expect(dialog.getByRole("button", { name: `Rename ${groupName}`, exact: true })).toBeEnabled();
+      const { data: group } = await supabase
+        .from("gradebook_column_groups")
+        .select("id")
+        .eq("class_id", course.id)
+        .eq("name", groupName)
+        .single();
+      expect(group).not.toBeNull();
+      groupId = group!.id;
+      for (const column of columns!) {
+        await expect(dialog.getByLabel(`Group for ${column.name}`, { exact: true })).toBeEnabled();
+        await dialog.getByLabel(`Group for ${column.name}`, { exact: true }).selectOption(String(groupId));
+        await expect
+          .poll(async () => {
+            const { data } = await supabase.from("gradebook_columns").select("group_id").eq("id", column.id).single();
+            return data?.group_id;
+          })
+          .toBe(groupId);
+      }
+      await expect(dialog.getByRole("button", { name: `Rename ${groupName}`, exact: true })).toBeEnabled();
+      await dialog.getByRole("button", { name: `Rename ${groupName}`, exact: true }).click();
+      await dialog.getByLabel("Rename group", { exact: true }).fill(renamed);
+      await dialog.getByRole("button", { name: "Save name", exact: true }).click();
+      await expect(dialog.getByRole("button", { name: `Move ${renamed} earlier`, exact: true })).toBeEnabled();
+      await dialog.getByRole("button", { name: `Move ${renamed} earlier`, exact: true }).click();
+      await expect(dialog.getByRole("button", { name: `Move ${renamed} later`, exact: true })).toBeEnabled();
+      await page.reload();
+      await page.getByRole("button", { name: "Manage groups", exact: true }).click();
+      for (const column of columns!) {
+        await expect(dialog.getByLabel(`Group for ${column.name}`, { exact: true })).toHaveValue(String(groupId));
+      }
+      await dialog.getByRole("button", { name: `Delete ${renamed}`, exact: true }).click();
+      for (const column of columns!) {
+        await expect(dialog.getByLabel(`Group for ${column.name}`, { exact: true })).toHaveValue("");
+      }
+      const after = await supabase
+        .from("gradebook_column_students")
+        .select("*", { count: "exact", head: true })
+        .in(
+          "gradebook_column_id",
+          columns!.map((column) => column.id)
+        );
+      expect(after.count).toBe(before.count);
+    } finally {
+      for (const column of columns ?? []) {
+        await supabase.from("gradebook_columns").update({ group_id: column.group_id }).eq("id", column.id);
+      }
+      if (groupId !== undefined) await supabase.from("gradebook_column_groups").delete().eq("id", groupId);
+    }
+  });
+
+  test("dragging a collapsed group preserves membership and survives reload", async ({ page }) => {
+    const course = await findSeededClass();
+    const instructor = await findInstructor(course.id);
+    const { data: groups } = await supabase
+      .from("gradebook_column_groups")
+      .select("id, name, sort_order")
+      .eq("class_id", course.id)
+      .order("sort_order");
+    const { data: columns } = await supabase
+      .from("gradebook_columns")
+      .select("id, group_id, sort_order")
+      .eq("class_id", course.id)
+      .order("id");
+    expect(groups!.length).toBeGreaterThan(2);
+    const first = groups![0];
+    const second = groups![1];
+    const { data: emptyGroup, error: emptyError } = await supabase
+      .from("gradebook_column_groups")
+      .insert({
+        class_id: course.id,
+        gradebook_id: course.gradebook_id!,
+        name: "Empty drag fixture",
+        sort_order: first.sort_order
+      })
+      .select("id")
+      .single();
+    if (emptyError) throw emptyError;
+    try {
+      await loginAsUser(page, instructor, course);
+      await page.goto(`/course/${course.id}/manage/gradebook`);
+      await page.getByRole("button", { name: "Collapse all groups", exact: true }).click();
+      const memberHeaders = (groupId: number) =>
+        page.locator(
+          columns!
+            .filter((column) => column.group_id === groupId)
+            .map((column) => `[role="columnheader"][data-col-id="grade_${column.id}"]`)
+            .join(",")
+        );
+      await expect(memberHeaders(first.id)).toHaveCount(1);
+      await expect(memberHeaders(second.id)).toHaveCount(1);
+      const handle = memberHeaders(second.id).getByLabel("Drag to reorder column");
+      await handle.click({ trial: true, timeout: 10000 });
+      const source = await handle.boundingBox();
+      const target = await memberHeaders(first.id).boundingBox();
+      expect(source).not.toBeNull();
+      expect(target).not.toBeNull();
+      await page.mouse.move(source!.x + source!.width / 2, source!.y + source!.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(source!.x - 15, source!.y + source!.height / 2, { steps: 3 });
+      await expect(handle).toHaveAttribute("aria-pressed", "true");
+      // closestCenter compares the dragged header's center, not the pointer on its left-hand grip.
+      await page.mouse.move(target!.x - target!.width / 2 + 5, source!.y + source!.height / 2, { steps: 12 });
+      await page.mouse.up();
+      await expect
+        .poll(async () => {
+          const { data } = await supabase
+            .from("gradebook_column_groups")
+            .select("id")
+            .eq("class_id", course.id)
+            .order("sort_order");
+          return data?.[0].id;
+        })
+        .toBe(second.id);
+      const { data: after } = await supabase
+        .from("gradebook_columns")
+        .select("id, group_id, sort_order")
+        .eq("class_id", course.id)
+        .order("id");
+      expect(after).toEqual(columns);
+      const { data: reorderedGroups } = await supabase
+        .from("gradebook_column_groups")
+        .select("id")
+        .eq("class_id", course.id)
+        .order("sort_order")
+        .order("id");
+      expect(reorderedGroups?.map((group) => group.id)).toEqual([
+        second.id,
+        first.id,
+        emptyGroup.id,
+        ...groups!.slice(2).map((group) => group.id)
+      ]);
+      await page.reload();
+      await expect(memberHeaders(first.id)).toHaveCount(1);
+      await expect(memberHeaders(second.id)).toHaveCount(1);
+      expect((await memberHeaders(second.id).boundingBox())!.x).toBeLessThan(
+        (await memberHeaders(first.id).boundingBox())!.x
+      );
+    } finally {
+      await supabase.from("gradebook_column_groups").delete().eq("id", emptyGroup.id);
+      for (const group of groups ?? []) {
+        await supabase.from("gradebook_column_groups").update({ sort_order: group.sort_order }).eq("id", group.id);
+      }
+    }
+  });
 });
