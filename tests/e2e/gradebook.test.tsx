@@ -843,6 +843,10 @@ test.describe("Gradebook Page - Comprehensive", () => {
   });
 
   test("Instructors can view comprehensive gradebook with real data", async ({ page }) => {
+    const tableRegion = page.getByRole("region", { name: "Instructor Gradebook Table" });
+    await tableRegion.getByRole("button", { name: "Expand all groups" }).click();
+    await waitForVirtualizerIdle(page);
+
     // Verify the gradebook loads with all components
     await expect(page.getByText("Student Name")).toBeVisible();
 
@@ -890,10 +894,7 @@ test.describe("Gradebook Page - Comprehensive", () => {
       expect(after).toBe(30);
     }).toPass({ timeout: 60_000 });
 
-    // Expand assignment groups and scroll right to reveal virtualized columns
-    const tableRegion = page.getByRole("region", { name: "Instructor Gradebook Table" });
-    await tableRegion.getByRole("button", { name: "Expand all groups" }).click();
-    await waitForVirtualizerIdle(page);
+    // Scroll right to reveal virtualized columns.
     await tableRegion.evaluate((el) => {
       el.scrollLeft = el.scrollWidth;
     });

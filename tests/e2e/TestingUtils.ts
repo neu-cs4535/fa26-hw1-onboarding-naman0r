@@ -3404,6 +3404,44 @@ export async function createAssignmentsAndGradebookColumns({
     assignments.push(assignment);
   }
 
+  // These fixtures model an instructor grouping assignments after creating them.
+  // New columns otherwise stay ungrouped, and migrations run before test fixtures exist.
+  if (assignments.length > 0) {
+    const { data: assignmentColumns, error: assignmentColumnsError } = await supabase
+      .from("assignments")
+      .select("gradebook_column_id")
+      .in(
+        "id",
+        assignments.map((assignment) => assignment.id)
+      );
+    if (assignmentColumnsError) throw assignmentColumnsError;
+
+    const { data: gradebook, error: gradebookError } = await supabase
+      .from("gradebooks")
+      .select("id")
+      .eq("class_id", class_id)
+      .single();
+    if (gradebookError) throw gradebookError;
+
+    const { data: group, error: groupError } = await supabase
+      .from("gradebook_column_groups")
+      .insert({ class_id, gradebook_id: gradebook.id, name: "Assignments", sort_order: 0 })
+      .select("id")
+      .single();
+    if (groupError) throw groupError;
+
+    const { error: membershipError } = await supabase
+      .from("gradebook_columns")
+      .update({ group_id: group.id })
+      .in(
+        "id",
+        assignmentColumns.flatMap((assignment) =>
+          assignment.gradebook_column_id === null ? [] : [assignment.gradebook_column_id]
+        )
+      );
+    if (membershipError) throw membershipError;
+  }
+
   // Create gradebook columns
   const gradebookColumns = [];
   const manualGradedColumns = [];
